@@ -1,0 +1,5 @@
+mlx
+numpy
+Pillow
+safetensors
+torch  # Required for weight conversion, optional for inference
