@@ -1,7 +1,11 @@
 
 # Sharp MLX
 
-A high-performance port of [Sharp](https://github.com/apple/ml-tract) (3D Gaussian Splatting from a single image) to **MLX**, available in **Python** and **Swift**.
+<p align="center">
+  <img src="resources/demo.webp" alt="Sharp MLX Demo" width="600">
+</p>
+
+A high-performance port of [Sharp](https://github.com/apple/ml-sharp) (3D Gaussian Splatting from a single image) to **MLX**, available in **Python** and **Swift**.
 
 Running entirely on Apple Silicon and achieves faster inference speeds compared to the PyTorch original.
 
@@ -43,6 +47,14 @@ xcodebuild build -scheme generate -configuration Release -destination 'platform=
 # Run inference
 .build/DerivedData/Build/Products/Release/generate --input ../inputs/image.jpg --output ../output.ply --weights ../checkpoints/sharp.safetensors
 ```
+
+### Video Rendering
+> **Note:** Video rendering uses [gsplat-mps](https://github.com/starkdmi/gsplat-mps) which is AGPL-3.0 licensed. See the [`render`](../../tree/render) branch for this feature.
+```bash
+# On the render branch
+python generate.py --input image.jpg --output output.ply --checkpoint sharp.safetensors --render --trajectory rotate_forward --num-frames 60
+```
+Trajectory options: swipe, shake, rotate, rotate_forward
 
 ## Directory Structure
 
