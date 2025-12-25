@@ -115,15 +115,18 @@ public class MultiLayerInitializer: Module {
             }
             disparityLayers = concatenated([firstLayer, followingLayer], axis: -1)
         }
+        evalAndClearIfEnabled(disparityLayers)
         
         // Create base x, y coordinates
         let (baseXNdc, baseYNdc) = createBaseXY(H: H, W: W, B: B)
+        evalAndClearIfEnabled(baseXNdc, baseYNdc)
         
         // Create base scales
         let disparityScaleFactor = 2.0 * scaleFactor * Float(stride) / Float(W)
         var baseScales = (1.0 / disparityLayers) * disparityScaleFactor
         baseScales = baseScales.expandedDimensions(axis: -1)
         baseScales = MLX.broadcast(baseScales, to: [B, baseHeight, baseWidth, numLayers, 3])
+        evalAndClearIfEnabled(baseScales)
         
         // Base quaternions (identity rotation)
         var baseQuaternions = MLXArray([1.0, 0.0, 0.0, 0.0] as [Float])
@@ -140,11 +143,13 @@ public class MultiLayerInitializer: Module {
         var imagePooled = avgPool2d(image, poolSize: stride)
         imagePooled = imagePooled.expandedDimensions(axis: 3)
         let baseColors = MLX.broadcast(imagePooled, to: [B, baseHeight, baseWidth, numLayers, 3])
+        evalAndClearIfEnabled(baseQuaternions, baseOpacities, baseColors)
         
         // Prepare feature input
         let normalizedDisparity = disparityFactor / MLX.maximum(depthNorm, MLXArray(1e-4))
         var featuresIn = concatenated([image, normalizedDisparity], axis: -1)
         featuresIn = 2.0 * featuresIn - 1.0
+        evalAndClearIfEnabled(featuresIn)
         
         let baseGaussianValues = GaussianBaseValues(
             meanXNdc: baseXNdc,
@@ -323,19 +328,26 @@ public class GaussianDensePredictionTransformer: Module {
         let encoderFeatures = Array(encodings[0..<numDecoderLevels])
         
         var features = decoder(encoderFeatures)
+        evalAndClearIfEnabled(features)
         
         // Apply upsample
         if let ct = upsample as? ConvTranspose2d {
             features = ct(features)
+            evalAndClearIfEnabled(features)
         }
         
         let skipInput = useDepthInput ? inputFeatures : inputFeatures[0..., 0..., 0..., 0..<3]
         let skipFeatures = image_encoder(skipInput).textureFeatures
+        evalAndClearIfEnabled(skipFeatures)
         
         features = fusion(features, skipFeatures)
+        evalAndClearIfEnabled(features)
         
         let textureFeatures = texture_head(features)
+        evalAndClearIfEnabled(textureFeatures)
+        
         let geometryFeatures = geometry_head(features)
+        evalAndClearIfEnabled(geometryFeatures)
         
         return ImageFeatures(textureFeatures: textureFeatures, geometryFeatures: geometryFeatures)
     }
@@ -398,6 +410,7 @@ public class GaussianComposer: Module {
         
         // Transpose: [B, H, W, 14, num_layers] -> [B, H, W, num_layers, 14]
         deltaVal = deltaVal.transposed(0, 1, 2, 4, 3)
+        evalAndClearIfEnabled(deltaVal)
         
         // Extract components
         let meanDelta = deltaVal[0..., 0..., 0..., 0..., 0..<3]
@@ -405,6 +418,7 @@ public class GaussianComposer: Module {
         let quatDelta = deltaVal[0..., 0..., 0..., 0..., 6..<10]
         let colorDelta = deltaVal[0..., 0..., 0..., 0..., 10..<13]
         let opacityDelta = deltaVal[0..., 0..., 0..., 0..., 13..<14]
+        evalAndClearIfEnabled(meanDelta, scaleDelta, quatDelta, colorDelta, opacityDelta)
         
         // Mean activation
         let meanX = baseValues.meanXNdc + meanDelta[0..., 0..., 0..., 0..., 0] * deltaFactorXY
@@ -419,6 +433,7 @@ public class GaussianComposer: Module {
             MLX.log(MLX.maximum(MLX.exp(inverseZBase) - 1.0, MLXArray(eps))) + inverseZDeltaMul
         ))
         let meanZ = 1.0 / (inverseZActivated + 1e-3)
+        evalAndClearIfEnabled(meanX, meanY, meanZ)
         
         // Construct mean vectors (NDC to metric: multiply x,y by z)
         let means = stacked([
@@ -426,6 +441,7 @@ public class GaussianComposer: Module {
             meanZ * meanY,
             meanZ
         ], axis: -1)
+        evalAndClearIfEnabled(means)
         
         // Scale activation
         var baseScales = baseValues.scales
@@ -441,14 +457,17 @@ public class GaussianComposer: Module {
         let constantB = MLX.log(MLXArray(ratio / (1.0 - ratio + 1e-8)))
         let scaleFactorMult = (maxScale - minScale) * sigmoid(constantA * scaleDelta * deltaFactorScale + constantB) + minScale
         var scales = baseScales * scaleFactorMult
+        evalAndClearIfEnabled(scales)
         
         // Quaternion: base + delta
         var quats = baseValues.quaternions + quatDelta * deltaFactorQuaternion
+        evalAndClearIfEnabled(quats)
         
         // Color activation (sigmoid-based)
         let baseColorsClipped = MLX.clip(baseValues.colors, min: 0.01, max: 0.99)
         let invSigmoidBase = MLX.log(baseColorsClipped / (1.0 - baseColorsClipped + 1e-8))
         var colors = sigmoid(invSigmoidBase + colorDelta * deltaFactorColor)
+        evalAndClearIfEnabled(colors)
         
         // sRGB to linearRGB conversion
         let threshold: Float = 0.04045
@@ -457,11 +476,13 @@ public class GaussianComposer: Module {
             colors / 12.92,
             MLX.pow((colors + 0.055) / 1.055, MLXArray(2.4))
         )
+        evalAndClearIfEnabled(colorsLinear)
         
         // Opacity activation
         let baseOpacitiesClipped = MLX.clip(baseValues.opacities, min: 0.01, max: 0.99)
         let invSigmoidBaseOp = MLX.log(baseOpacitiesClipped / (1.0 - baseOpacitiesClipped + 1e-8))
         var opacities = sigmoid(invSigmoidBaseOp + opacityDelta * deltaFactorOpacity)
+        evalAndClearIfEnabled(opacities)
         
         // Apply global scaling
         var meansOut = means
@@ -484,6 +505,7 @@ public class GaussianComposer: Module {
             colorsOut = colorsOut.reshaped(B, -1, 3)
             opacitiesOut = opacitiesOut.reshaped(B, -1, 1)
         }
+        evalAndClearIfEnabled(meansOut, scalesOut, quatsOut, colorsOut, opacitiesOut)
         
         return Gaussians3D(
             means: meansOut,

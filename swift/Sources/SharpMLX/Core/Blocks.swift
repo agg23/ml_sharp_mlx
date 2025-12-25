@@ -309,10 +309,12 @@ public class FeatureFusionBlock2d: Module {
         
         if let skip = x1 {
             let res = resnet1(skip)
+            evalAndClearIfEnabled(res)
             x = x + res
         }
         
         x = resnet2(x)
+        evalAndClearIfEnabled(x)
         
         // Apply deconv
         if let ct = deconv as? ConvTranspose2d {
@@ -320,6 +322,7 @@ public class FeatureFusionBlock2d: Module {
         } else if let up = deconv as? Upsample {
             x = up(x)
         }
+        evalAndClearIfEnabled(x)
         
         x = out_conv(x)
         

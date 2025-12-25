@@ -345,68 +345,105 @@ public class SlidingPyramidNetwork: Module {
             padding = 0
         }
         
-        let x0TileSize = x0Patches.dim(0) / batchSize
+        logMemoryIfEnabled("SPN:after split", prefix: "      ")
         
-        // Concatenate all patches
-        let xPyramidPatches = concatenated([x0Patches, x1Patches, x2Patches], axis: 0)
+        // Two processing modes:
+        // 1. Batch mode (default): Process all patches at once - original behavior, faster on Mac
+        // 2. Sequential mode (aggressiveMemoryManagement): Process one patch at a time to minimize peak memory
         
-        // Run patch encoder on all patches
-        let (xPyramidEncodings, patchIntermediateFeatures) = patch_encoder(xPyramidPatches)
+        let x0Encodings: MLXArray
+        let x0IntermediateFeatures: [Int: MLXArray]?
+        let x1Encodings: MLXArray
         
-        // Extract intermediate features for latent encodings
+        if sharpMLXConfig.aggressiveMemoryManagement {
+            // Sequential processing for memory-constrained devices
+            (x0Encodings, x0IntermediateFeatures) = processPatchesSequentially(x0Patches, extractIntermediate: true, label: "x0")
+            logMemoryIfEnabled("SPN:after x0 patches", prefix: "      ")
+            (x1Encodings, _) = processPatchesSequentially(x1Patches, extractIntermediate: false, label: "x1")
+        } else {
+            // Batch processing - original behavior
+            let (enc0, int0) = patch_encoder(x0Patches)
+            x0Encodings = enc0
+            x0IntermediateFeatures = int0
+            let (enc1, _) = patch_encoder(x1Patches)
+            x1Encodings = enc1
+        }
+        
+        // Extract intermediate features for latent encodings from x0
         var xLatent0Features: MLXArray?
         var xLatent1Features: MLXArray?
         
         if let ids = patch_encoder.intermediateFeatureIds, ids.count >= 2,
-           let feature0 = patchIntermediateFeatures[ids[0]],
-           let feature1 = patchIntermediateFeatures[ids[1]] {
+           let intFeatures = x0IntermediateFeatures,
+           let feature0 = intFeatures[ids[0]],
+           let feature1 = intFeatures[ids[1]] {
             let xLatent0Encodings = patch_encoder.reshapeFeature(feature0)
             xLatent0Features = merge(
-                xLatent0Encodings[0..<(batchSize * x0TileSize), 0..., 0..., 0...],
+                xLatent0Encodings,
                 batchSize: batchSize,
                 padding: padding
             )
+            evalAndClearIfEnabled(xLatent0Features!)
+            logMemoryIfEnabled("SPN:after xLatent0 merge", prefix: "      ")
             
             let xLatent1Encodings = patch_encoder.reshapeFeature(feature1)
             xLatent1Features = merge(
-                xLatent1Encodings[0..<(batchSize * x0TileSize), 0..., 0..., 0...],
+                xLatent1Encodings,
                 batchSize: batchSize,
                 padding: padding
             )
+            evalAndClearIfEnabled(xLatent1Features!)
+            logMemoryIfEnabled("SPN:after xLatent1 merge", prefix: "      ")
         }
         
-        // Split pyramid encodings back
-        let numX0 = x0Patches.dim(0)
-        let numX1 = x1Patches.dim(0)
-        
-        let x0Encodings = xPyramidEncodings[0..<numX0, 0..., 0..., 0...]
-        let x1Encodings = xPyramidEncodings[numX0..<(numX0 + numX1), 0..., 0..., 0...]
-        let x2Encodings = xPyramidEncodings[(numX0 + numX1)..., 0..., 0..., 0...]
-        
-        // Merge patches back to feature maps
+        // Merge x0 patches
         var x0Features = merge(x0Encodings, batchSize: batchSize, padding: padding)
+        evalAndClearIfEnabled(x0Features)
+        
+        // Merge x1 patches
         var x1Features = merge(x1Encodings, batchSize: batchSize, padding: 2 * padding)
+        evalAndClearIfEnabled(x1Features)
+        logMemoryIfEnabled("SPN:after x1 merge", prefix: "      ")
+        
+        // Process x2 patches (1 patch)
+        let (x2Encodings, _) = patch_encoder(x2Patches)
         var x2Features = x2Encodings
+        evalAndClearIfEnabled(x2Features)
         
         // Run image encoder on low-res image
         let (xLowresFeatures, _) = image_encoder(x2Patches)
+        evalAndClearIfEnabled(xLowresFeatures)
+        logMemoryIfEnabled("SPN:after x2 + lowres", prefix: "      ")
         
-        // Upsample all feature maps
+        // Upsample all feature maps - THIS IS WHERE LARGE TENSORS ARE CREATED
         if var latent0 = xLatent0Features {
             latent0 = upsample_latent0(latent0)
             xLatent0Features = latent0
+            evalAndClearIfEnabled(latent0)
+            logMemoryIfEnabled("SPN:after upsample_latent0 (1536x1536x256)", prefix: "      ")
         }
+        
         if var latent1 = xLatent1Features {
             latent1 = upsample_latent1(latent1)
             xLatent1Features = latent1
+            evalAndClearIfEnabled(latent1)
+            logMemoryIfEnabled("SPN:after upsample_latent1 (768x768x256)", prefix: "      ")
         }
         
         x0Features = upsample0(x0Features)
-        x1Features = upsample1(x1Features)
-        x2Features = upsample2(x2Features)
+        evalAndClearIfEnabled(x0Features)
+        logMemoryIfEnabled("SPN:after upsample0", prefix: "      ")
         
-        var lowresUpsampled = upsample_lowres(xLowresFeatures)
+        x1Features = upsample1(x1Features)
+        evalAndClearIfEnabled(x1Features)
+        
+        x2Features = upsample2(x2Features)
+        evalAndClearIfEnabled(x2Features)
+        
+        let lowresUpsampled = upsample_lowres(xLowresFeatures)
         let fusedLowres = fuse_lowres(concatenated([x2Features, lowresUpsampled], axis: -1))
+        evalAndClearIfEnabled(fusedLowres)
+        logMemoryIfEnabled("SPN:after all upsamples", prefix: "      ")
         
         return [
             xLatent0Features ?? MLXArray.zeros([1]),
@@ -415,6 +452,59 @@ public class SlidingPyramidNetwork: Module {
             x1Features,
             fusedLowres
         ]
+    }
+    
+    /// Process patches one at a time to minimize peak memory usage
+    /// Used when aggressiveMemoryManagement is enabled
+    private func processPatchesSequentially(_ patches: MLXArray, extractIntermediate: Bool, label: String) -> (MLXArray, [Int: MLXArray]?) {
+        let numPatches = patches.dim(0)
+        var encodingsList: [MLXArray] = []
+        var intermediateFeatures: [Int: [MLXArray]] = [:]
+        
+        for i in 0..<numPatches {
+            let patch = patches[i..<(i+1), 0..., 0..., 0...]
+            
+            let (encodings, intFeatures) = patch_encoder(patch)
+            eval(encodings)
+            encodingsList.append(encodings)
+            
+            if extractIntermediate, let ids = patch_encoder.intermediateFeatureIds {
+                for id in ids {
+                    if let feat = intFeatures[id] {
+                        eval(feat)
+                        if intermediateFeatures[id] == nil {
+                            intermediateFeatures[id] = []
+                        }
+                        intermediateFeatures[id]!.append(feat)
+                    }
+                }
+            }
+            
+            GPU.clearCache()
+            
+            if (i + 1) % 5 == 0 || i == numPatches - 1 {
+                logMemoryIfEnabled("SPN:\(label) patch \(i+1)/\(numPatches)", prefix: "      ")
+            }
+        }
+        
+        let combined = concatenated(encodingsList, axis: 0)
+        eval(combined)
+        encodingsList.removeAll()
+        GPU.clearCache()
+        
+        if extractIntermediate {
+            var combinedIntermediate: [Int: MLXArray] = [:]
+            for (id, feats) in intermediateFeatures {
+                let concat = concatenated(feats, axis: 0)
+                eval(concat)
+                combinedIntermediate[id] = concat
+            }
+            intermediateFeatures.removeAll()
+            GPU.clearCache()
+            return (combined, combinedIntermediate)
+        }
+        
+        return (combined, nil)
     }
 }
 

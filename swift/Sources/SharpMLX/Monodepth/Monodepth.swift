@@ -144,7 +144,9 @@ public class MonodepthWithEncodingAdaptor: Module {
     
     public func callAsFunction(_ image: MLXArray) -> MonodepthOutput {
         let inputs = monodepth_predictor.normalizer(image)
+        logMemoryIfEnabled("Monodepth:before encoder", prefix: "    ")
         let encoderOutput = monodepth_predictor.encoder(inputs)
+        logMemoryIfEnabled("Monodepth:after encoder (SPN)", prefix: "    ")
         
         let numEncoderFeatures = monodepth_predictor.encoder.dims_encoder.count
         let encoderFeatures = Array(encoderOutput[0..<numEncoderFeatures])
@@ -152,19 +154,32 @@ public class MonodepthWithEncodingAdaptor: Module {
             ? Array(encoderOutput[numEncoderFeatures...])
             : []
         
+        // Eval encoder features before decoder
+        if sharpMLXConfig.aggressiveMemoryManagement {
+            for feat in encoderFeatures {
+                eval(feat)
+            }
+            GPU.clearCache()
+        }
+        logMemoryIfEnabled("Monodepth:after encoder eval+clear", prefix: "    ")
+        
         let decoderFeatures = monodepth_predictor.decoder(encoderFeatures)
+        evalAndClearIfEnabled(decoderFeatures)
+        logMemoryIfEnabled("Monodepth:after decoder", prefix: "    ")
         
         // Apply head
         var disparity = decoderFeatures
         for layer in monodepth_predictor.head {
             disparity = applyHeadLayer(layer, disparity)
         }
+        evalAndClearIfEnabled(disparity)
         
         // Sort disparity layers if needed
         if numMonodepthLayers == 2 && sortingMonodepth {
             let firstLayer = disparity.max(axis: -1, keepDims: true)
             let secondLayer = disparity.min(axis: -1, keepDims: true)
             disparity = concatenated([firstLayer, secondLayer], axis: -1)
+            evalAndClearIfEnabled(disparity)
         }
         
         var outputFeatures: [MLXArray] = []

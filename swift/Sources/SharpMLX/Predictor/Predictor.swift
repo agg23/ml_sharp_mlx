@@ -73,20 +73,32 @@ public class SharpPredictor: Module {
     }
     
     public func callAsFunction(_ image: MLXArray, disparityFactor: MLXArray) -> Gaussians3D {
+        logMemoryIfEnabled("Predictor:start", prefix: "  ")
+        
         // Estimate depth
         let monodepthOutput = monodepth_model(image)
         let monodepthDisparity = monodepthOutput.disparity
+        evalAndClearIfEnabled(monodepthDisparity)
+        logMemoryIfEnabled("Predictor:after monodepth", prefix: "  ")
         
         // Convert disparity to depth
         let dispFactorExpanded = disparityFactor.expandedDimensions(axes: [1, 2, 3])
         let monodepth = dispFactorExpanded / MLX.clip(monodepthDisparity, min: 1e-4, max: 1e4)
+        evalAndClearIfEnabled(monodepth)
         
         // Initialize base Gaussians
         let initOutput = init_model(image, depth: monodepth)
+        evalAndClearIfEnabled(initOutput.featureInput)
+        logMemoryIfEnabled("Predictor:after init", prefix: "  ")
         
         // Predict delta values
         let imageFeatures = feature_model(initOutput.featureInput, encodings: monodepthOutput.outputFeatures)
+        evalAndClearIfEnabled(imageFeatures.textureFeatures, imageFeatures.geometryFeatures)
+        logMemoryIfEnabled("Predictor:after feature_model", prefix: "  ")
+        
         let deltaValues = prediction_head(imageFeatures)
+        evalAndClearIfEnabled(deltaValues)
+        logMemoryIfEnabled("Predictor:after prediction_head", prefix: "  ")
         
         // Compose final Gaussians
         let gaussians = gaussian_composer(
@@ -94,6 +106,7 @@ public class SharpPredictor: Module {
             baseValues: initOutput.gaussianBaseValues,
             globalScale: initOutput.globalScale
         )
+        logMemoryIfEnabled("Predictor:after composer", prefix: "  ")
         
         return gaussians
     }

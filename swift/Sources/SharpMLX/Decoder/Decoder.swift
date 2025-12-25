@@ -84,10 +84,12 @@ public class MultiresConvDecoder: Module {
         // Project features and fuse from lowest resolution to highest
         var features = applyConv(convs[numLevels - 1], encodings[numLevels - 1])
         features = fusions[numLevels - 1](features, nil)
+        evalAndClearIfEnabled(features)
         
         for i in stride(from: numLevels - 2, through: 0, by: -1) {
             let featuresI = applyConv(convs[i], encodings[i])
             features = fusions[i](features, featuresI)
+            evalAndClearIfEnabled(features)
         }
         
         return features

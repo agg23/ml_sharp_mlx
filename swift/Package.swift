@@ -7,7 +7,8 @@ let package = Package(
     name: "SharpMLX",
     platforms: [
         .macOS(.v14),
-        .iOS(.v16)
+        .iOS(.v16),
+        .visionOS(.v1)
     ],
     products: [
         // Library containing model code
